@@ -1,0 +1,585 @@
+/**
+ * ============================================================================
+ * APLIKASI: GURU PAI SMK WILAYAH UTARA
+ * FILE: Code.gs (Backend Google Apps Script - Server-Side Injection Ready)
+ * ============================================================================
+ */
+
+const SHEET_DATA = 'DataGuru';
+const SHEET_CONFIG = 'Config';
+const DEFAULT_ADMIN_PASS = 'adminpai2026';
+
+/**
+ * Mendapatkan referensi Spreadsheet (mendukung Container-bound maupun Standalone Script).
+ */
+function getTargetSpreadsheet() {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    const props = PropertiesService.getScriptProperties();
+    let ssId = props.getProperty('SPREADSHEET_ID');
+    if (ssId) {
+      try {
+        ss = SpreadsheetApp.openById(ssId);
+      } catch (e) {
+        ss = null;
+      }
+    }
+    if (!ss) {
+      ss = SpreadsheetApp.create('Database GURU PAI SMK WILAYAH UTARA');
+      props.setProperty('SPREADSHEET_ID', ss.getId());
+    }
+  }
+  return ss;
+}
+
+/**
+ * Fungsi utama untuk merender antarmuka HTML ketika Web App diakses.
+ * Menyuntikkan data awal langsung ke dalam HTML agar tidak pernah stuck di loading.
+ */
+function doGet(e) {
+  try {
+    initDatabase();
+    return HtmlService.createHtmlOutputFromFile('Index')
+      .setTitle('GURU PAI SMK WILAYAH UTARA')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1.0');
+  } catch (error) {
+    return HtmlService.createHtmlOutput(
+      `<div style="font-family:sans-serif;padding:24px;color:#b91c1c;background:#fef2f2;border-radius:12px;margin:20px;border:1px solid #fecaca;">
+        <h2 style="margin-top:0;">Terjadi Kesalahan Sistem (doGet)</h2>
+        <p><strong>Detail Error:</strong> ${error.message}</p>
+        <p style="font-size:13px;color:#7f1d1d;">Pastikan Anda telah memberikan izin akses (Authorize) saat melakukan Deploy Web App.</p>
+      </div>`
+    );
+  }
+}
+
+/**
+ * Inisialisasi otomatis struktur Google Spreadsheet jika belum ada.
+ */
+function initDatabase() {
+  const ss = getTargetSpreadsheet();
+  
+  // 1. Setup Sheet DataGuru
+  let dataSheet = ss.getSheetByName(SHEET_DATA);
+  if (!dataSheet) {
+    dataSheet = ss.insertSheet(SHEET_DATA);
+    const defaultSheet = ss.getSheetByName('Sheet1');
+    if (defaultSheet && ss.getSheets().length > 1) {
+      ss.deleteSheet(defaultSheet);
+    }
+
+    const headers = [
+      'ID', 
+      'NIP / NUPTK', 
+      'Nama Lengkap', 
+      'Unit Kerja (SMK)', 
+      'Status Kepegawaian', 
+      'Sertifikasi', 
+      'No. HP / WA', 
+      'Terakhir Diperbarui'
+    ];
+    dataSheet.getRange(1, 1, 1, headers.length)
+      .setValues([headers])
+      .setFontWeight('bold')
+      .setBackground('#065f46')
+      .setFontColor('#ffffff');
+    dataSheet.setFrozenRows(1);
+    
+    const nowStr = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'dd/MM/yyyy HH:mm');
+    const sampleData = [
+      [
+        'PAI-' + Date.now() + '-1',
+        "'198504122010011015",
+        'Ahmad Fauzi, S.Pd.I., M.Pd.',
+        'SMK Negeri 1 Wilayah Utara',
+        'PNS',
+        'Sudah Sertifikasi',
+        "'081234567890",
+        nowStr
+      ],
+      [
+        'PAI-' + Date.now() + '-2',
+        "'199208172022212008",
+        'Siti Aminah, S.Ag.',
+        'SMK Negeri 2 Wilayah Utara',
+        'PPPK',
+        'Sudah Sertifikasi',
+        "'085678901234",
+        nowStr
+      ]
+    ];
+    dataSheet.getRange(2, 1, sampleData.length, headers.length).setValues(sampleData);
+  }
+
+  // 2. Setup Sheet Config untuk menyimpan Password Admin
+  let configSheet = ss.getSheetByName(SHEET_CONFIG);
+  if (!configSheet) {
+    configSheet = ss.insertSheet(SHEET_CONFIG);
+    configSheet.getRange('A1:B1').setValues([['Kunci', 'Nilai']]).setFontWeight('bold');
+    configSheet.getRange('A2:B2').setValues([['ADMIN_PASSWORD', DEFAULT_ADMIN_PASS]]);
+    configSheet.hideSheet();
+  }
+}
+
+/**
+ * Mengambil password admin yang tersimpan di sheet Config.
+ */
+function getStoredPassword() {
+  initDatabase();
+  const ss = getTargetSpreadsheet();
+  const configSheet = ss.getSheetByName(SHEET_CONFIG);
+  const data = configSheet.getDataRange().getDisplayValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === 'ADMIN_PASSWORD') {
+      return String(data[i][1]).trim();
+    }
+  }
+  return DEFAULT_ADMIN_PASS;
+}
+
+/**
+ * Verifikasi login Admin (hanya membutuhkan password).
+ */
+function verifyAdminPassword(inputPassword) {
+  try {
+    if (!inputPassword) {
+      return { success: false, message: 'Password tidak boleh kosong.' };
+    }
+    const storedPass = getStoredPassword();
+    if (String(inputPassword).trim() === storedPass) {
+      return { success: true, message: 'Autentikasi berhasil! Mode Admin aktif.' };
+    } else {
+      return { success: false, message: 'Password salah. Silakan coba lagi.' };
+    }
+  } catch (e) {
+    return { success: false, message: 'Gagal memverifikasi password: ' + e.message };
+  }
+}
+
+/**
+ * Mengambil seluruh data Guru PAI dari Spreadsheet sebagai string murni.
+ */
+function getAllGuruData() {
+  try {
+    initDatabase();
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const lastRow = sheet.getLastRow();
+    
+    if (lastRow <= 1) {
+      return { success: true, data: [] };
+    }
+
+    const values = sheet.getRange(2, 1, lastRow - 1, 8).getDisplayValues();
+    const result = values
+      .filter(row => row[0] !== '' || row[2] !== '')
+      .map(row => ({
+        id: String(row[0] || ''),
+        nip: String(row[1] || '-'),
+        nama: String(row[2] || ''),
+        sekolah: String(row[3] || ''),
+        status: String(row[4] || ''),
+        sertifikasi: String(row[5] || ''),
+        noHp: String(row[6] || '-'),
+        updatedAt: String(row[7] || '')
+      }))
+      .reverse();
+
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, message: 'Gagal memuat data: ' + error.message };
+  }
+}
+
+/**
+ * Menambahkan data Guru baru (Hanya Admin).
+ */
+function addGuruData(payload, password) {
+  try {
+    const auth = verifyAdminPassword(password);
+    if (!auth.success) {
+      return { success: false, message: 'Akses ditolak: ' + auth.message };
+    }
+
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const newId = 'PAI-' + Date.now();
+    const timestamp = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'dd/MM/yyyy HH:mm');
+
+    const newRow = [
+      newId,
+      "'" + (payload.nip || '-'),
+      payload.nama.trim(),
+      payload.sekolah.trim(),
+      payload.status,
+      payload.sertifikasi,
+      "'" + (payload.noHp || '-'),
+      timestamp
+    ];
+
+    sheet.appendRow(newRow);
+    return { success: true, message: 'Data Guru PAI berhasil ditambahkan!' };
+  } catch (error) {
+    return { success: false, message: 'Gagal menyimpan data: ' + error.message };
+  }
+}
+
+/**
+ * Memperbarui data Guru berdasarkan ID (Hanya Admin).
+ */
+function updateGuruData(payload, password) {
+  try {
+    const auth = verifyAdminPassword(password);
+    if (!auth.success) {
+      return { success: false, message: 'Akses ditolak: ' + auth.message };
+    }
+
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const data = sheet.getDataRange().getDisplayValues();
+    const timestamp = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'dd/MM/yyyy HH:mm');
+
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(payload.id)) {
+        const rowNumber = i + 1;
+        const updatedRow = [
+          payload.id,
+          "'" + (payload.nip || '-'),
+          payload.nama.trim(),
+          payload.sekolah.trim(),
+          payload.status,
+          payload.sertifikasi,
+          "'" + (payload.noHp || '-'),
+          timestamp
+        ];
+        sheet.getRange(rowNumber, 1, 1, 8).setValues([updatedRow]);
+        return { success: true, message: 'Data Guru PAI berhasil diperbarui!' };
+      }
+    }
+
+    return { success: false, message: 'Data tidak ditemukan di database.' };
+  } catch (error) {
+    return { success: false, message: 'Gagal memperbarui data: ' + error.message };
+  }
+}
+
+/**
+ * Menghapus data Guru berdasarkan ID (Hanya Admin).
+ */
+function deleteGuruData(id, password) {
+  try {
+    const auth = verifyAdminPassword(password);
+    if (!auth.success) {
+      return { success: false, message: 'Akses ditolak: ' + auth.message };
+    }
+
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const data = sheet.getDataRange().getDisplayValues();
+
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(id)) {
+        sheet.deleteRow(i + 1);
+        return { success: true, message: 'Data berhasil dihapus.' };
+      }
+    }
+
+    return { success: false, message: 'Data tidak ditemukan.' };
+  } catch (error) {
+    return { success: false, message: 'Gagal menghapus data: ' + error.message };
+  }
+}
+
+/**
+ * ============================================================================
+ * APLIKASI: GURU PAI SMK WILAYAH UTARA
+ * FILE: Code.gs (Backend Google Apps Script - Server-Side Injection Ready)
+ * ============================================================================
+ */
+
+const SHEET_DATA = 'DataGuru';
+const SHEET_CONFIG = 'Config';
+const DEFAULT_ADMIN_PASS = 'adminpai2026';
+
+/**
+ * Mendapatkan referensi Spreadsheet (mendukung Container-bound maupun Standalone Script).
+ */
+function getTargetSpreadsheet() {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    const props = PropertiesService.getScriptProperties();
+    let ssId = props.getProperty('SPREADSHEET_ID');
+    if (ssId) {
+      try {
+        ss = SpreadsheetApp.openById(ssId);
+      } catch (e) {
+        ss = null;
+      }
+    }
+    if (!ss) {
+      ss = SpreadsheetApp.create('Database GURU PAI SMK WILAYAH UTARA');
+      props.setProperty('SPREADSHEET_ID', ss.getId());
+    }
+  }
+  return ss;
+}
+
+/**
+ * Fungsi utama untuk merender antarmuka HTML ketika Web App diakses.
+ * Menyuntikkan data awal langsung ke dalam HTML agar tidak pernah stuck di loading.
+ */
+function doGet(e) {
+  try {
+    initDatabase();
+    return HtmlService.createHtmlOutputFromFile('Index')
+      .setTitle('GURU PAI SMK WILAYAH UTARA')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1.0');
+  } catch (error) {
+    return HtmlService.createHtmlOutput(
+      `<div style="font-family:sans-serif;padding:24px;color:#b91c1c;background:#fef2f2;border-radius:12px;margin:20px;border:1px solid #fecaca;">
+        <h2 style="margin-top:0;">Terjadi Kesalahan Sistem (doGet)</h2>
+        <p><strong>Detail Error:</strong> ${error.message}</p>
+        <p style="font-size:13px;color:#7f1d1d;">Pastikan Anda telah memberikan izin akses (Authorize) saat melakukan Deploy Web App.</p>
+      </div>`
+    );
+  }
+}
+
+/**
+ * Inisialisasi otomatis struktur Google Spreadsheet jika belum ada.
+ */
+function initDatabase() {
+  const ss = getTargetSpreadsheet();
+  
+  // 1. Setup Sheet DataGuru
+  let dataSheet = ss.getSheetByName(SHEET_DATA);
+  if (!dataSheet) {
+    dataSheet = ss.insertSheet(SHEET_DATA);
+    const defaultSheet = ss.getSheetByName('Sheet1');
+    if (defaultSheet && ss.getSheets().length > 1) {
+      ss.deleteSheet(defaultSheet);
+    }
+
+    const headers = [
+      'ID', 
+      'NIP / NUPTK', 
+      'Nama Lengkap', 
+      'Unit Kerja (SMK)', 
+      'Status Kepegawaian', 
+      'Sertifikasi', 
+      'No. HP / WA', 
+      'Terakhir Diperbarui'
+    ];
+    dataSheet.getRange(1, 1, 1, headers.length)
+      .setValues([headers])
+      .setFontWeight('bold')
+      .setBackground('#065f46')
+      .setFontColor('#ffffff');
+    dataSheet.setFrozenRows(1);
+    
+    const nowStr = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'dd/MM/yyyy HH:mm');
+    const sampleData = [
+      [
+        'PAI-' + Date.now() + '-1',
+        "'198504122010011015",
+        'Ahmad Fauzi, S.Pd.I., M.Pd.',
+        'SMK Negeri 1 Wilayah Utara',
+        'PNS',
+        'Sudah Sertifikasi',
+        "'081234567890",
+        nowStr
+      ],
+      [
+        'PAI-' + Date.now() + '-2',
+        "'199208172022212008",
+        'Siti Aminah, S.Ag.',
+        'SMK Negeri 2 Wilayah Utara',
+        'PPPK',
+        'Sudah Sertifikasi',
+        "'085678901234",
+        nowStr
+      ]
+    ];
+    dataSheet.getRange(2, 1, sampleData.length, headers.length).setValues(sampleData);
+  }
+
+  // 2. Setup Sheet Config untuk menyimpan Password Admin
+  let configSheet = ss.getSheetByName(SHEET_CONFIG);
+  if (!configSheet) {
+    configSheet = ss.insertSheet(SHEET_CONFIG);
+    configSheet.getRange('A1:B1').setValues([['Kunci', 'Nilai']]).setFontWeight('bold');
+    configSheet.getRange('A2:B2').setValues([['ADMIN_PASSWORD', DEFAULT_ADMIN_PASS]]);
+    configSheet.hideSheet();
+  }
+}
+
+/**
+ * Mengambil password admin yang tersimpan di sheet Config.
+ */
+function getStoredPassword() {
+  initDatabase();
+  const ss = getTargetSpreadsheet();
+  const configSheet = ss.getSheetByName(SHEET_CONFIG);
+  const data = configSheet.getDataRange().getDisplayValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === 'ADMIN_PASSWORD') {
+      return String(data[i][1]).trim();
+    }
+  }
+  return DEFAULT_ADMIN_PASS;
+}
+
+/**
+ * Verifikasi login Admin (hanya membutuhkan password).
+ */
+function verifyAdminPassword(inputPassword) {
+  try {
+    if (!inputPassword) {
+      return { success: false, message: 'Password tidak boleh kosong.' };
+    }
+    const storedPass = getStoredPassword();
+    if (String(inputPassword).trim() === storedPass) {
+      return { success: true, message: 'Autentikasi berhasil! Mode Admin aktif.' };
+    } else {
+      return { success: false, message: 'Password salah. Silakan coba lagi.' };
+    }
+  } catch (e) {
+    return { success: false, message: 'Gagal memverifikasi password: ' + e.message };
+  }
+}
+
+/**
+ * Mengambil seluruh data Guru PAI dari Spreadsheet sebagai string murni.
+ */
+function getAllGuruData() {
+  try {
+    initDatabase();
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const lastRow = sheet.getLastRow();
+    
+    if (lastRow <= 1) {
+      return { success: true, data: [] };
+    }
+
+    const values = sheet.getRange(2, 1, lastRow - 1, 8).getDisplayValues();
+    const result = values
+      .filter(row => row[0] !== '' || row[2] !== '')
+      .map(row => ({
+        id: String(row[0] || ''),
+        nip: String(row[1] || '-'),
+        nama: String(row[2] || ''),
+        sekolah: String(row[3] || ''),
+        status: String(row[4] || ''),
+        sertifikasi: String(row[5] || ''),
+        noHp: String(row[6] || '-'),
+        updatedAt: String(row[7] || '')
+      }))
+      .reverse();
+
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, message: 'Gagal memuat data: ' + error.message };
+  }
+}
+
+/**
+ * Menambahkan data Guru baru (Hanya Admin).
+ */
+function addGuruData(payload, password) {
+  try {
+    const auth = verifyAdminPassword(password);
+    if (!auth.success) {
+      return { success: false, message: 'Akses ditolak: ' + auth.message };
+    }
+
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const newId = 'PAI-' + Date.now();
+    const timestamp = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'dd/MM/yyyy HH:mm');
+
+    const newRow = [
+      newId,
+      "'" + (payload.nip || '-'),
+      payload.nama.trim(),
+      payload.sekolah.trim(),
+      payload.status,
+      payload.sertifikasi,
+      "'" + (payload.noHp || '-'),
+      timestamp
+    ];
+
+    sheet.appendRow(newRow);
+    return { success: true, message: 'Data Guru PAI berhasil ditambahkan!' };
+  } catch (error) {
+    return { success: false, message: 'Gagal menyimpan data: ' + error.message };
+  }
+}
+
+/**
+ * Memperbarui data Guru berdasarkan ID (Hanya Admin).
+ */
+function updateGuruData(payload, password) {
+  try {
+    const auth = verifyAdminPassword(password);
+    if (!auth.success) {
+      return { success: false, message: 'Akses ditolak: ' + auth.message };
+    }
+
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const data = sheet.getDataRange().getDisplayValues();
+    const timestamp = Utilities.formatDate(new Date(), 'Asia/Jakarta', 'dd/MM/yyyy HH:mm');
+
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(payload.id)) {
+        const rowNumber = i + 1;
+        const updatedRow = [
+          payload.id,
+          "'" + (payload.nip || '-'),
+          payload.nama.trim(),
+          payload.sekolah.trim(),
+          payload.status,
+          payload.sertifikasi,
+          "'" + (payload.noHp || '-'),
+          timestamp
+        ];
+        sheet.getRange(rowNumber, 1, 1, 8).setValues([updatedRow]);
+        return { success: true, message: 'Data Guru PAI berhasil diperbarui!' };
+      }
+    }
+
+    return { success: false, message: 'Data tidak ditemukan di database.' };
+  } catch (error) {
+    return { success: false, message: 'Gagal memperbarui data: ' + error.message };
+  }
+}
+
+/**
+ * Menghapus data Guru berdasarkan ID (Hanya Admin).
+ */
+function deleteGuruData(id, password) {
+  try {
+    const auth = verifyAdminPassword(password);
+    if (!auth.success) {
+      return { success: false, message: 'Akses ditolak: ' + auth.message };
+    }
+
+    const ss = getTargetSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_DATA);
+    const data = sheet.getDataRange().getDisplayValues();
+
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]) === String(id)) {
+        sheet.deleteRow(i + 1);
+        return { success: true, message: 'Data berhasil dihapus.' };
+      }
+    }
+
+    return { success: false, message: 'Data tidak ditemukan.' };
+  } catch (error) {
+    return { success: false, message: 'Gagal menghapus data: ' + error.message };
+  }
+}
